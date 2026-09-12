@@ -45,19 +45,32 @@ correr = st.button("Estimar los diez modelos y comparar", type="primary", use_co
 
 if correr:
     barra = st.progress(0.0, text="Preparando…")
-    st.session_state["ajustes"] = ajustar_todos(train, h, periodo, frecuencia, progreso=barra)
+    ajustes, train_est, recortada = ajustar_todos(train, h, periodo, frecuencia, progreso=barra)
+    st.session_state["ajustes"] = ajustes
     st.session_state["train"] = train
+    st.session_state["train_est"] = train_est
+    st.session_state["recorte_est"] = recortada
     st.session_state["test"] = test
     st.session_state["h_usado"] = h
 
 ajustes = st.session_state.get("ajustes")
 if not ajustes:
-    st.info("Pulse el botón para estimar. Tardará un momento: ARIMA, Prophet y los modelos de rezagos pesan más.")
+    st.info(
+        "Pulse el botón para estimar. En series largas se usa una ventana reciente de la "
+        "muestra de entrenamiento para que ARIMA, Prophet y los modelos de rezagos no se atasquen."
+    )
     st.stop()
 
 train = st.session_state["train"]
+train_est = st.session_state.get("train_est", train)
 test = st.session_state["test"]
-df = tabla_errores(ajustes, train, test)
+if st.session_state.get("recorte_est"):
+    st.caption(
+        f"Para estimar se usaron los últimos {len(train_est):,} periodos de la muestra de "
+        f"entrenamiento ({train_est.index.min():%Y-%m} → {train_est.index.max():%Y-%m}). "
+        "El gráfico muestra la serie completa; las métricas de entrenamiento son de esa ventana."
+    )
+df = tabla_errores(ajustes, train_est, test)
 veredicto = recomendar(df)
 
 if veredicto["modelo"]:
@@ -164,7 +177,10 @@ with tabs[1]:
         plot_bgcolor="#fffdf8",
         legend=dict(orientation="h", y=1.12),
         margin=dict(l=10, r=10, t=30, b=10),
-        yaxis=dict(gridcolor="#efe6d4", title=st.session_state.get("medida", "Valor")),
+        yaxis=dict(
+            gridcolor="#efe6d4",
+            title=st.session_state.get("medida_nombre") or st.session_state.get("medida", "Valor"),
+        ),
         xaxis=dict(showgrid=False),
     )
     st.plotly_chart(fig, use_container_width=True)

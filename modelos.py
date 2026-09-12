@@ -11,6 +11,16 @@ from metricas import aic_de, calcular
 
 warnings.filterwarnings("ignore")
 
+# Ventana reciente para estimar. La muestra de test no se toca:
+# el pronóstico sale del último dato de entrenamiento, con menos historia.
+TOPES_ENTRENAMIENTO = {
+    "diaria": 400,
+    "semanal": 130,
+    "mensual": 168,
+    "trimestral": 72,
+    "anual": 60,
+}
+
 
 @dataclass
 class Ajuste:
@@ -20,6 +30,13 @@ class Ajuste:
     aic: float = field(default=np.nan)
     ok: bool = False
     nota: str = ""
+
+
+def recortar_para_estimar(train: pd.Series, frecuencia: str) -> tuple[pd.Series, bool]:
+    tope = TOPES_ENTRENAMIENTO.get(frecuencia, 168)
+    if len(train) > tope:
+        return train.iloc[-tope:], True
+    return train, False
 
 
 def _idx_futuro(train: pd.Series, h: int) -> pd.DatetimeIndex:
@@ -39,8 +56,19 @@ def _ets(train, h, **kw) -> Ajuste:
             return Ajuste(nombre, nota="Requiere valores estrictamente positivos.")
         if kw.get("seasonal") and len(train) < 2 * int(kw.get("seasonal_periods") or 12):
             return Ajuste(nombre, nota="Historia insuficiente para un ciclo estacional.")
-        model = ExponentialSmoothing(train.astype(float), **kw)
-        fit = model.fit(optimized=True)
+        # Semanal con ciclo 52: Holt-Winters se vuelve muy pesado.
+        periodo = int(kw.get("seasonal_periods") or 0)
+        if kw.get("seasonal") and periodo >= 52:
+            return Ajuste(
+                nombre,
+                nota="En series semanales el ciclo anual se deja a ARIMA/Prophet; HW con 52 estaciones se atasca.",
+            )
+        model = ExponentialSmoothing(
+            train.astype(float),
+            initialization_method="heuristic",
+            **kw,
+        )
+        fit = model.fit(optimized=True, method="L-BFGS-B")
         fc = pd.Series(np.asarray(fit.forecast(h)).ravel(), index=_idx_futuro(train, h), name=nombre)
         fitted = pd.Series(np.asarray(fit.fittedvalues).ravel(), index=train.index[: len(fit.fittedvalues)], name=nombre)
         return Ajuste(nombre, fc, fitted, aic_de(fit), True)
@@ -73,15 +101,28 @@ def arima(train, h, periodo=12, **_):
     try:
         from pmdarima import auto_arima
 
-        estacional = bool(periodo and periodo >= 4 and len(train) >= 3 * periodo)
+        n = len(train)
+        m = int(periodo) if periodo else 1
+        # m=52 (semana) y series largas con m=7 cuelgan la búsqueda estacional.
+        estacional = m in (4, 7, 12) and n >= 3 * m and n <= 180
         fit = auto_arima(
             train.astype(float),
             seasonal=estacional,
-            m=int(periodo) if estacional else 1,
+            m=int(m) if estacional else 1,
             stepwise=True,
             approximation=True,
             suppress_warnings=True,
             error_action="ignore",
+            max_p=2,
+            max_q=2,
+            max_P=1,
+            max_Q=1,
+            max_d=1,
+            max_D=1 if estacional else 0,
+            max_order=5,
+            n_fits=15,
+            maxiter=40,
+            method="lbfgs",
         )
         fc = pd.Series(np.asarray(fit.predict(h)).ravel(), index=_idx_futuro(train, h), name=nombre)
         fitted = pd.Series(np.asarray(fit.predict_in_sample()).ravel(), index=train.index[: len(train)], name=nombre)
@@ -103,13 +144,16 @@ def prophet(train, h, periodo=12, frecuencia="mensual", **_):
         logging.getLogger("prophet").setLevel(logging.WARNING)
 
         df = pd.DataFrame({"ds": pd.to_datetime(train.index), "y": train.astype(float).values})
-        yearly = frecuencia in ("mensual", "trimestral", "semanal", "diaria") and len(train) >= 24
+        yearly = frecuencia in ("mensual", "trimestral", "semanal") and len(train) >= 24
         weekly = frecuencia == "diaria"
         m = Prophet(
             yearly_seasonality=yearly,
             weekly_seasonality=weekly,
             daily_seasonality=False,
             seasonality_mode="additive",
+            n_changepoints=min(12, max(4, len(train) // 25)),
+            uncertainty_samples=0,
+            mcmc_samples=0,
         )
         m.fit(df)
         futuro = pd.DataFrame({"ds": _idx_futuro(train, h)})
@@ -123,16 +167,13 @@ def prophet(train, h, periodo=12, frecuencia="mensual", **_):
 
 
 def _lags_ml(y: np.ndarray, lags: int):
-    X, t = [], []
-    for i in range(lags, len(y)):
-        X.append(y[i - lags : i])
-        t.append(y[i])
-    return np.asarray(X), np.asarray(t)
+    ventanas = np.lib.stride_tricks.sliding_window_view(y, lags + 1)
+    return ventanas[:, :-1].copy(), ventanas[:, -1].copy()
 
 
 def _ml(nombre, modelo, train, h, periodo=12):
     y = train.astype(float).to_numpy()
-    lags = int(max(3, min(periodo if periodo and periodo > 1 else 6, 12, max(3, len(y) // 4))))
+    lags = int(max(3, min(periodo if periodo and periodo > 1 else 6, 8, max(3, len(y) // 4))))
     if len(y) < lags + 8:
         return Ajuste(nombre, nota="Historia corta para un modelo de rezagos.")
     try:
@@ -140,10 +181,10 @@ def _ml(nombre, modelo, train, h, periodo=12):
         modelo.fit(X, t)
         fitted_vals = modelo.predict(X)
         fitted = pd.Series(fitted_vals, index=train.index[lags : lags + len(fitted_vals)], name=nombre)
-        hist = list(y)
+        hist = y.tolist()
         preds = []
         for _ in range(h):
-            x = np.asarray(hist[-lags:]).reshape(1, -1)
+            x = np.asarray(hist[-lags:], dtype=float).reshape(1, -1)
             preds.append(float(modelo.predict(x)[0]))
             hist.append(preds[-1])
         fc = pd.Series(preds, index=_idx_futuro(train, h), name=nombre)
@@ -156,11 +197,18 @@ def svr(train, h, periodo=12, **_):
     try:
         from sklearn.pipeline import make_pipeline
         from sklearn.preprocessing import StandardScaler
-        from sklearn.svm import SVR
+        from sklearn.svm import LinearSVR, SVR
     except ModuleNotFoundError:
         return Ajuste("SVR", nota="Falta scikit-learn. Instale con: pip install scikit-learn")
 
-    m = make_pipeline(StandardScaler(), SVR(C=10.0, epsilon=0.05, kernel="rbf"))
+    if len(train) >= 180:
+        try:
+            nucleo = LinearSVR(C=1.0, epsilon=0.05, max_iter=2500, dual="auto")
+        except TypeError:
+            nucleo = LinearSVR(C=1.0, epsilon=0.05, max_iter=2500)
+    else:
+        nucleo = SVR(C=10.0, epsilon=0.05, kernel="rbf")
+    m = make_pipeline(StandardScaler(), nucleo)
     return _ml("SVR", m, train, h, periodo)
 
 
@@ -170,7 +218,13 @@ def rf(train, h, periodo=12, **_):
     except ModuleNotFoundError:
         return Ajuste("RF", nota="Falta scikit-learn. Instale con: pip install scikit-learn")
 
-    m = RandomForestRegressor(n_estimators=250, min_samples_leaf=2, random_state=7)
+    m = RandomForestRegressor(
+        n_estimators=80,
+        max_depth=8,
+        min_samples_leaf=2,
+        random_state=7,
+        n_jobs=1,
+    )
     return _ml("RF", m, train, h, periodo)
 
 
@@ -181,9 +235,9 @@ def xgb(train, h, periodo=12, **_):
         return Ajuste("XGBoost", nota="Falta el paquete xgboost. Instale con: pip install xgboost")
 
     m = XGBRegressor(
-        n_estimators=250,
+        n_estimators=80,
         max_depth=3,
-        learning_rate=0.05,
+        learning_rate=0.08,
         subsample=0.9,
         colsample_bytree=0.9,
         objective="reg:squarederror",
@@ -207,16 +261,19 @@ CATALOGO_MODELOS = [
 ]
 
 
-def ajustar_todos(train: pd.Series, h: int, periodo: int, frecuencia: str, progreso=None) -> dict[str, Ajuste]:
+def ajustar_todos(
+    train: pd.Series, h: int, periodo: int, frecuencia: str, progreso=None
+) -> tuple[dict[str, Ajuste], pd.Series, bool]:
+    train_uso, recortada = recortar_para_estimar(train, frecuencia)
     out = {}
     n = len(CATALOGO_MODELOS)
     for i, (nombre, fn) in enumerate(CATALOGO_MODELOS, start=1):
         if progreso is not None:
             progreso.progress(i / n, text=f"Estimando {nombre}…")
-        out[nombre] = fn(train, h, periodo=periodo, frecuencia=frecuencia)
+        out[nombre] = fn(train_uso, h, periodo=periodo, frecuencia=frecuencia)
     if progreso is not None:
         progreso.progress(1.0, text="Listo")
-    return out
+    return out, train_uso, recortada
 
 
 def tabla_errores(ajustes: dict[str, Ajuste], train: pd.Series, test: pd.Series) -> pd.DataFrame:

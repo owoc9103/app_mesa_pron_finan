@@ -9,10 +9,30 @@ from catalogo import CATALOGO, DATA_DIR, OCULTAR
 @st.cache_data(show_spinner=False)
 def cargar_tabla(dataset_id: str) -> pd.DataFrame:
     ruta = DATA_DIR / f"{dataset_id}.csv"
-    df = pd.read_csv(ruta)
+    meta = CATALOGO[dataset_id]
+    header = pd.read_csv(ruta, nrows=0).columns.tolist()
+    keep = {"fecha"}
+    keep.update(meta.get("variables", {}))
+    keep.update(meta.get("entidades", []))
+    usecols = [c for c in header if c in keep]
+    if not usecols:
+        usecols = None
+    kwargs = {"usecols": usecols, "parse_dates": ["fecha"]}
+    try:
+        df = pd.read_csv(ruta, engine="pyarrow", **kwargs)
+    except Exception:
+        df = pd.read_csv(ruta, **kwargs)
     df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
-    df = df.dropna(subset=["fecha"]).sort_values("fecha")
-    return df
+    return df.dropna(subset=["fecha"]).sort_values("fecha")
+
+
+@st.cache_data(show_spinner=False)
+def valores_unicos(dataset_id: str, col: str, filtros: tuple) -> list[str]:
+    df = cargar_tabla(dataset_id)
+    for clave, valor in filtros:
+        if clave in df.columns:
+            df = df[df[clave] == valor]
+    return sorted(df[col].dropna().astype(str).unique().tolist())
 
 
 def columnas_medida(df: pd.DataFrame, dataset_id: str) -> list[str]:
