@@ -72,6 +72,21 @@ def filtrar(df: pd.DataFrame, filtros: dict) -> pd.DataFrame:
     return out
 
 
+@st.cache_data(show_spinner=False)
+def extraer_serie_cache(dataset_id: str, medida: str, filtros: tuple) -> pd.Series:
+    df = cargar_tabla(dataset_id)
+    for clave, valor in filtros:
+        if clave in df.columns:
+            df = df[df[clave] == valor]
+    return extraer_serie(df, medida)
+
+
+def serie_para_plot(serie: pd.Series, max_n: int = 360) -> pd.Series:
+    if serie is None or len(serie) <= max_n:
+        return serie
+    return serie.iloc[:: max(1, len(serie) // max_n)]
+
+
 def extraer_serie(df: pd.DataFrame, medida: str) -> pd.Series:
     g = df.groupby("fecha", as_index=True)[medida].mean().sort_index()
     g.name = medida

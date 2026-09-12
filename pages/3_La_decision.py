@@ -3,7 +3,9 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from modelos import ajustar_todos, recomendar, tabla_errores
+from datos import serie_para_plot
+from modelos import recomendar, tabla_errores
+from servidor import clave_estimacion, estimar_compartido
 from ui import aplicar, hero, reco
 
 st.set_page_config(page_title="La decisión", page_icon="◈", layout="wide")
@@ -12,7 +14,7 @@ aplicar()
 hero(
     "Muestra de entrenamiento y muestra de test",
     "La decisión",
-    "Los diez modelos se estiman con la muestra de entrenamiento y se comparan en la muestra de test. Gana quien falla menos en test.",
+    "Los diez modelos se estiman con la muestra de entrenamiento y se comparan en la muestra de test. Gana quien falla menos en test. Si varios eligen la misma serie y la misma ventana, el servidor reutiliza el cálculo.",
 )
 
 serie = st.session_state.get("serie")
@@ -44,14 +46,28 @@ t3.metric("La muestra de test inicia", test.index.min().strftime("%Y-%m-%d"))
 correr = st.button("Estimar los diez modelos y comparar", type="primary", use_container_width=True)
 
 if correr:
+    clave = clave_estimacion(
+        st.session_state.get("dataset_id"),
+        st.session_state.get("filtros"),
+        st.session_state.get("medida"),
+        h,
+    )
     barra = st.progress(0.0, text="Preparando…")
-    ajustes, train_est, recortada = ajustar_todos(train, h, periodo, frecuencia, progreso=barra)
+    with st.spinner(
+        "Si hay más personas estimando, espera su turno: el servidor hace un cálculo a la vez "
+        "para no saturarse. Si esa serie ya se pidió, el resultado sale al instante."
+    ):
+        ajustes, train_est, recortada, de_cache = estimar_compartido(
+            clave, train, h, periodo, frecuencia, progreso=barra
+        )
+    barra.progress(1.0, text="Listo (ya estaba en el servidor)" if de_cache else "Listo")
     st.session_state["ajustes"] = ajustes
     st.session_state["train"] = train
     st.session_state["train_est"] = train_est
     st.session_state["recorte_est"] = recortada
     st.session_state["test"] = test
     st.session_state["h_usado"] = h
+    st.session_state["de_cache"] = de_cache
 
 ajustes = st.session_state.get("ajustes")
 if not ajustes:
@@ -64,6 +80,8 @@ if not ajustes:
 train = st.session_state["train"]
 train_est = st.session_state.get("train_est", train)
 test = st.session_state["test"]
+if st.session_state.get("de_cache"):
+    st.caption("Este resultado ya estaba en el servidor: otra sesión pidió la misma serie y la misma ventana.")
 if st.session_state.get("recorte_est"):
     st.caption(
         f"Para estimar se usaron los últimos {len(train_est):,} periodos de la muestra de "
@@ -122,14 +140,15 @@ with tabs[0]:
             margin=dict(l=10, r=10, t=50, b=10),
             yaxis=dict(gridcolor="#efe6d4", title="RMSE"),
         )
-        st.plotly_chart(figb, use_container_width=True)
+        st.plotly_chart(figb, use_container_width=True, config={"displayModeBar": False})
 
 with tabs[1]:
     fig = go.Figure()
+    train_vista = serie_para_plot(train)
     fig.add_trace(
         go.Scatter(
-            x=train.index,
-            y=train.values,
+            x=train_vista.index,
+            y=train_vista.values,
             name="Muestra de entrenamiento",
             line=dict(color="#8a8373", width=1.6),
         )
@@ -183,7 +202,7 @@ with tabs[1]:
         ),
         xaxis=dict(showgrid=False),
     )
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
     panel = pd.DataFrame({"fecha": test.index, "real": test.values})
     for nombre, aj in ajustes.items():

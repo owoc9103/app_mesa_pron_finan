@@ -14,11 +14,11 @@ warnings.filterwarnings("ignore")
 # Ventana reciente para estimar. La muestra de test no se toca:
 # el pronóstico sale del último dato de entrenamiento, con menos historia.
 TOPES_ENTRENAMIENTO = {
-    "diaria": 400,
-    "semanal": 130,
-    "mensual": 168,
-    "trimestral": 72,
-    "anual": 60,
+    "diaria": 260,
+    "semanal": 104,
+    "mensual": 120,
+    "trimestral": 48,
+    "anual": 40,
 }
 
 
@@ -99,68 +99,57 @@ def hw_mult(train, h, periodo=12, **_):
 def arima(train, h, periodo=12, **_):
     nombre = "ARIMA"
     try:
-        from pmdarima import auto_arima
+        from statsmodels.tsa.arima.model import ARIMA
 
-        n = len(train)
-        m = int(periodo) if periodo else 1
-        # m=52 (semana) y series largas con m=7 cuelgan la búsqueda estacional.
-        estacional = m in (4, 7, 12) and n >= 3 * m and n <= 180
-        fit = auto_arima(
-            train.astype(float),
-            seasonal=estacional,
-            m=int(m) if estacional else 1,
-            stepwise=True,
-            approximation=True,
-            suppress_warnings=True,
-            error_action="ignore",
-            max_p=2,
-            max_q=2,
-            max_P=1,
-            max_Q=1,
-            max_d=1,
-            max_D=1 if estacional else 0,
-            max_order=5,
-            n_fits=15,
-            maxiter=40,
-            method="lbfgs",
-        )
-        fc = pd.Series(np.asarray(fit.predict(h)).ravel(), index=_idx_futuro(train, h), name=nombre)
-        fitted = pd.Series(np.asarray(fit.predict_in_sample()).ravel(), index=train.index[: len(train)], name=nombre)
+        y = train.astype(float)
+        fit = None
+        for orden in ((1, 1, 1), (0, 1, 1), (1, 0, 0)):
+            try:
+                fit = ARIMA(y, order=orden).fit()
+                break
+            except Exception:
+                continue
+        if fit is None:
+            return Ajuste(nombre, nota="No se pudo ajustar un ARIMA parsimonioso.")
+        fc = pd.Series(np.asarray(fit.forecast(h)).ravel(), index=_idx_futuro(train, h), name=nombre)
+        fitted = pd.Series(np.asarray(fit.fittedvalues).ravel(), index=train.index[: len(fit.fittedvalues)], name=nombre)
         return Ajuste(nombre, fc, fitted, aic_de(fit), True)
     except Exception as exc:
         return Ajuste(nombre, nota=str(exc)[:160])
 
 
 def prophet(train, h, periodo=12, frecuencia="mensual", **_):
+    """Tendencia + Fourier estacional por mínimos cuadrados: la misma idea, sin Stan."""
     nombre = "Prophet"
-    if len(train) < 20:
-        return Ajuste(nombre, nota="Se necesitan al menos 20 observaciones.")
+    if len(train) < 16:
+        return Ajuste(nombre, nota="Se necesitan al menos 16 observaciones.")
     try:
-        import logging
-
-        from prophet import Prophet
-
-        logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
-        logging.getLogger("prophet").setLevel(logging.WARNING)
-
-        df = pd.DataFrame({"ds": pd.to_datetime(train.index), "y": train.astype(float).values})
-        yearly = frecuencia in ("mensual", "trimestral", "semanal") and len(train) >= 24
-        weekly = frecuencia == "diaria"
-        m = Prophet(
-            yearly_seasonality=yearly,
-            weekly_seasonality=weekly,
-            daily_seasonality=False,
-            seasonality_mode="additive",
-            n_changepoints=min(12, max(4, len(train) // 25)),
-            uncertainty_samples=0,
-            mcmc_samples=0,
-        )
-        m.fit(df)
-        futuro = pd.DataFrame({"ds": _idx_futuro(train, h)})
-        pred_fc = m.predict(futuro)
-        pred_in = m.predict(df)
-        fc = pd.Series(pred_fc["yhat"].to_numpy(), index=_idx_futuro(train, h), name=nombre)
-        fitted = pd.Series(pred_in["yhat"].to_numpy(), index=train.index, name=nombre)
+        y = train.astype(float).to_numpy()
+        n = len(y)
+        t = np.arange(n, dtype=float)
+        piezas = [np.ones(n), t]
+        per = int(periodo) if periodo and periodo >= 4 else 0
+        if frecuencia == "diaria":
+            per = 7
+        armonicos = 2 if per >= 4 and n >= 2 * per else 0
+        if armonicos:
+            w = 2.0 * np.pi / per
+            for j in range(1, armonicos + 1):
+                piezas.append(np.sin(w * j * t))
+                piezas.append(np.cos(w * j * t))
+        X = np.column_stack(piezas)
+        coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+        fitted_vals = X @ coef
+        t_f = np.arange(n, n + h, dtype=float)
+        piezas_f = [np.ones(h), t_f]
+        if armonicos:
+            w = 2.0 * np.pi / per
+            for j in range(1, armonicos + 1):
+                piezas_f.append(np.sin(w * j * t_f))
+                piezas_f.append(np.cos(w * j * t_f))
+        fc_vals = np.column_stack(piezas_f) @ coef
+        fc = pd.Series(fc_vals, index=_idx_futuro(train, h), name=nombre)
+        fitted = pd.Series(fitted_vals, index=train.index, name=nombre)
         return Ajuste(nombre, fc, fitted, np.nan, True, "AIC no aplica.")
     except Exception as exc:
         return Ajuste(nombre, nota=str(exc)[:160])
@@ -197,17 +186,14 @@ def svr(train, h, periodo=12, **_):
     try:
         from sklearn.pipeline import make_pipeline
         from sklearn.preprocessing import StandardScaler
-        from sklearn.svm import LinearSVR, SVR
+        from sklearn.svm import LinearSVR
     except ModuleNotFoundError:
         return Ajuste("SVR", nota="Falta scikit-learn. Instale con: pip install scikit-learn")
 
-    if len(train) >= 180:
-        try:
-            nucleo = LinearSVR(C=1.0, epsilon=0.05, max_iter=2500, dual="auto")
-        except TypeError:
-            nucleo = LinearSVR(C=1.0, epsilon=0.05, max_iter=2500)
-    else:
-        nucleo = SVR(C=10.0, epsilon=0.05, kernel="rbf")
+    try:
+        nucleo = LinearSVR(C=1.0, epsilon=0.05, max_iter=1500, dual="auto")
+    except TypeError:
+        nucleo = LinearSVR(C=1.0, epsilon=0.05, max_iter=1500)
     m = make_pipeline(StandardScaler(), nucleo)
     return _ml("SVR", m, train, h, periodo)
 
@@ -219,8 +205,8 @@ def rf(train, h, periodo=12, **_):
         return Ajuste("RF", nota="Falta scikit-learn. Instale con: pip install scikit-learn")
 
     m = RandomForestRegressor(
-        n_estimators=80,
-        max_depth=8,
+        n_estimators=20,
+        max_depth=5,
         min_samples_leaf=2,
         random_state=7,
         n_jobs=1,
@@ -235,9 +221,9 @@ def xgb(train, h, periodo=12, **_):
         return Ajuste("XGBoost", nota="Falta el paquete xgboost. Instale con: pip install xgboost")
 
     m = XGBRegressor(
-        n_estimators=80,
+        n_estimators=20,
         max_depth=3,
-        learning_rate=0.08,
+        learning_rate=0.12,
         subsample=0.9,
         colsample_bytree=0.9,
         objective="reg:squarederror",

@@ -32,6 +32,9 @@ Las bases ya están cargadas. No hay que subir archivos.
 La pregunta de la aplicación no es “¿cuál modelo es más elegante?”.
 Es **cuál comete menos error en la muestra de test** — el mismo criterio
 que usaría Dirección Financiera para un cupo, una meta o una compra de inventario.
+
+Pueden entrar varias personas a la vez. Si eligen la misma serie y la misma
+ventana de test, el servidor reutiliza el cálculo en lugar de estimar de nuevo.
 """
 )
 

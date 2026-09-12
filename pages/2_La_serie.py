@@ -6,8 +6,9 @@ from datos import (
     cargar_tabla,
     columnas_entidad,
     columnas_medida,
-    extraer_serie,
+    extraer_serie_cache,
     horizonte_sugerido,
+    serie_para_plot,
     valores_unicos,
 )
 from ui import aplicar, hero
@@ -73,21 +74,22 @@ medida = st.selectbox(
 nombre = nombre_variable(elegido, medida)
 st.info(meta.get("variables", {}).get(medida, "Variable numérica de la base."))
 
-serie = extraer_serie(trabajo, medida)
+serie = extraer_serie_cache(elegido, medida, tuple(sorted(filtros.items())))
 if len(serie) < 16:
     st.warning("Quedan pocas observaciones. El recorte puede ser demasiado estrecho.")
 
+vista = serie_para_plot(serie)
 fig = go.Figure()
 fig.add_trace(
     go.Scatter(
-        x=serie.index,
-        y=serie.values,
+        x=vista.index,
+        y=vista.values,
         mode="lines",
         name=nombre,
         line=dict(color="#1b365d", width=2.2),
     )
 )
-usa_slider = len(serie) <= 350
+usa_slider = len(serie) <= 240
 fig.update_layout(
     height=420,
     margin=dict(l=10, r=10, t=40, b=10),
@@ -100,7 +102,7 @@ fig.update_layout(
     xaxis=dict(rangeslider=dict(visible=usa_slider), showgrid=False),
     yaxis=dict(gridcolor="#efe6d4"),
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 k1, k2, k3, k4 = st.columns(4)
 k1.metric("Observaciones", f"{len(serie):,}")

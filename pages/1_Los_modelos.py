@@ -69,7 +69,7 @@ La temporada **escala con el nivel**: si el negocio es más grande, el pico de d
         "ARIMA",
         """
 Combina rezagos de la serie (AR), diferenciación (I) y rezagos del error (MA).
-La app elige el orden con búsqueda automática, con parte estacional si hay historia suficiente.
+La app ajusta un ARIMA parsimonioso (por defecto 1,1,1), sin una búsqueda que sature el servidor.
 
 **Sirve cuando** hay persistencia, necesidad de diferenciar o un patrón que el suavizado no captura bien.
 
@@ -79,8 +79,9 @@ La app elige el orden con búsqueda automática, con parte estacional si hay his
     (
         "Prophet",
         """
-Descompone la serie en tendencia flexible (con posibles quiebres) y estacionalidades.
-Es robusto a huecos y a cambios de nivel.
+Descompone la serie en tendencia y estacionalidad (términos de Fourier),
+la misma idea de Prophet, ajustada por mínimos cuadrados para que un salón
+pueda estimar a la vez sin tumbar el servidor.
 
 **Sirve cuando** hay temporada y la tendencia no es una recta. No sustituye a un modelo causal.
 

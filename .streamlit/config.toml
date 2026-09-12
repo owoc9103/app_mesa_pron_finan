@@ -8,3 +8,14 @@ font = "sans serif"
 
 [client]
 toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+fastReruns = true
+
+[server]
+headless = true
+fileWatcherType = "none"
+maxUploadSize = 1
